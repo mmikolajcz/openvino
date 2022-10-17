@@ -8,6 +8,10 @@
 #include "itt.hpp"
 
 namespace ov {
+op::v10::IsInf::IsInf(const Output<Node>& data) : op::Op{{data}} {
+    constructor_validate_and_infer_types();
+}
+
 op::v10::IsInf::IsInf(const Output<Node>& data, const Attributes& attributes)
     : op::Op{{data}},
       m_attributes{attributes} {
@@ -24,7 +28,7 @@ bool op::v10::IsInf::visit_attributes(AttributeVisitor& visitor) {
 void op::v10::IsInf::validate_and_infer_types() {
     OV_OP_SCOPE(v10_IsInf_validate_and_infer_types);
     NODE_VALIDATION_CHECK(this,
-                          get_input_element_type(0).is_real(),
+                          get_input_element_type(0).is_dynamic() || get_input_element_type(0).is_real(),
                           "The element type of the input tensor must be a floating point number.");
     set_output_type(0, element::boolean, get_input_partial_shape(0));
 }
