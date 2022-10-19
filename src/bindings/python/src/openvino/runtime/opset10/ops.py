@@ -91,7 +91,7 @@ def is_inf(
     attributes: Optional[dict] = None,
     name: Optional[str] = None,
 ) -> Node:
-    """Return a node which perform IsInf operation.
+    """Return a node which performs IsInf operation.
 
     :param data: The input tensor.
     :param attributes: Optional dictionary containing IsInf attributes.
@@ -100,11 +100,11 @@ def is_inf(
     Available attributes:
 
     * detect_negative   Specifies whether to map negative infinities to true in output map.
-                        Range od values: true, false
+                        Range of values: true, false
                         Default value: true
                         Required: no
     * detect_positive   Specifies whether to map positive infinities to true in output map.
-                        Range od values: true, false
+                        Range of values: true, false
                         Default value: true
                         Required: no
 
@@ -113,3 +113,14 @@ def is_inf(
     if not attributes:
         attributes = {}
     return _get_node_factory_opset10().create("IsInf", as_nodes(data), attributes)
+
+
+@nameable_op
+def is_nan(data: NodeInput, name: Optional[str] = None) -> Node:
+    """Performs element-wise mapping from NaN to True. Other values are mapped to False.
+
+    :param  data:          A tensor of floating point numeric type and arbitrary shape.
+    :param  name:          Optional name for the output node. Default is None.
+    :return: Node representing is_nan operation.
+    """
+    return _get_node_factory_opset10().create("IsNaN", as_nodes(data))
