@@ -7,7 +7,7 @@
 #include <ngraph/validation_util.hpp>
 
 #include "itt.hpp"
-#include "ngraph/runtime/reference/is_nan.hpp"
+#include "ngraph/runtime/reference/elementwise_functor_call.hpp"
 
 namespace ov {
 ov::op::v10::IsNaN::IsNaN(const Output<Node>& data) : op::Op{{data}} {
@@ -33,29 +33,26 @@ bool ov::op::v10::IsNaN::visit_attributes(AttributeVisitor& visitor) {
     return true;
 }
 
-
 namespace {
-template <typename T, typename U>
-U functor_is_nan(const T x) {
-    return (static_cast<U>(std::isnan(x)));
-}
-
-template <element::Type_t ET>
-bool evaluate_exec(const HostTensorPtr& input,
-                   const HostTensorPtr& output) {
-    ngraph::runtime::reference::is_nan(input->get_data_ptr<ET>(),
-                                       output->get_data_ptr<element::Type_t::boolean>(),
-                                       shape_size(input->get_shape()));
+template <element::Type_t OUT_ET, element::Type_t DATA_ET>
+bool evaluate_exec(const HostTensorPtr& input, const HostTensorPtr& output) {
+    ngraph::runtime::reference::elementwise_functor_call(
+        input->get_data_ptr<DATA_ET>(),
+        output->get_data_ptr<OUT_ET>(),
+        shape_size(input->get_shape()),
+        [](DATA_ET x) -> OUT_ET {
+            return (static_cast<OUT_ET>(std::isnan(x)));
+        });
     return true;
 }
 
 #define IS_NAN_TYPE_CASE(a, ...)                             \
     case element::Type_t::a: {                               \
         OV_OP_SCOPE(OV_PP_CAT3(evaluate_exec_is_nan, _, a)); \
-        rc = evaluate_exec<element::Type_t::a>(__VA_ARGS__); \
+        rc = evaluate_exec<OUT_ET, element::Type_t::a>(__VA_ARGS__); \
     } break
 
-template <element::Type_t ET>
+template <element::Type_t OUT_ET>
 bool evaluate(const HostTensorPtr& input, const HostTensorPtr& output) {
     bool rc = true;
     switch (input->get_element_type()) {
@@ -70,8 +67,7 @@ bool evaluate(const HostTensorPtr& input, const HostTensorPtr& output) {
     return rc;
 }
 
-bool evaluate_is_nan(const HostTensorPtr& input,
-                     const HostTensorPtr& output) {
+bool evaluate_is_nan(const HostTensorPtr& input, const HostTensorPtr& output) {
     bool rc = true;
     switch (input->get_element_type()) {
         NGRAPH_TYPE_CASE(evaluate_is_nan, bf16, input, output);
