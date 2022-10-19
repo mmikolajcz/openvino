@@ -34,14 +34,16 @@ bool ov::op::v10::IsNaN::visit_attributes(AttributeVisitor& visitor) {
 }
 
 namespace {
-template <element::Type_t OUT_ET, element::Type_t DATA_ET>
+template <element::Type_t ET>
 bool evaluate_exec(const HostTensorPtr& input, const HostTensorPtr& output) {
+    using T = typename element_type_traits<ET>::value_type;
+    using U = typename element_type_traits<element::Type_t::boolean>::value_type;
     ngraph::runtime::reference::elementwise_functor_call(
-        input->get_data_ptr<DATA_ET>(),
-        output->get_data_ptr<OUT_ET>(),
+        input->get_data_ptr<ET>(),
+        output->get_data_ptr<element::Type_t::boolean>(),
         shape_size(input->get_shape()),
-        [](DATA_ET x) -> OUT_ET {
-            return (static_cast<OUT_ET>(std::isnan(x)));
+        [](T x) -> U {
+            return static_cast<U>(std::isnan(x));
         });
     return true;
 }
@@ -49,10 +51,10 @@ bool evaluate_exec(const HostTensorPtr& input, const HostTensorPtr& output) {
 #define IS_NAN_TYPE_CASE(a, ...)                             \
     case element::Type_t::a: {                               \
         OV_OP_SCOPE(OV_PP_CAT3(evaluate_exec_is_nan, _, a)); \
-        rc = evaluate_exec<OUT_ET, element::Type_t::a>(__VA_ARGS__); \
+        rc = evaluate_exec<element::Type_t::a>(__VA_ARGS__); \
     } break
 
-template <element::Type_t OUT_ET>
+template <element::Type_t ET>
 bool evaluate(const HostTensorPtr& input, const HostTensorPtr& output) {
     bool rc = true;
     switch (input->get_element_type()) {
