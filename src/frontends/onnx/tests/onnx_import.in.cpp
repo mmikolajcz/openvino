@@ -6021,7 +6021,7 @@ NGRAPH_TEST(${BACKEND_NAME}, onnx_is_nan) {
     
     test_case.add_input<float>(Shape{1, 2, 3}, {std::nanf(""), std::nanf(""), -0.6000f, -1.0000f, std::nanf(""), -1.0000f});
 
-    test_case.add_expected_output<float>(
+    test_case.add_expected_output<bool>(
         Shape{1, 2, 3},
         {true, true, false, false, true, false});
 
