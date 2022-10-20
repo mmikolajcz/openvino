@@ -7,15 +7,13 @@
 #include <cmath>
 #include <cstddef>
 
-#include "ngraph/runtime/reference/elementwise_functor_call.hpp"
-
 namespace ngraph {
 namespace runtime {
 namespace reference {
 template <typename T, typename U>
 void is_nan(const T* input, U* output, size_t count) {
-    runtime::reference::elementwise_functor_call(input, output, count, [](T x) -> U {
-        return (static_cast<U>(std::isnan(x)));
+    std::transform(input, input + count, output, [](T x) {
+        return std::isnan(x);
     });
 }
 }  // namespace reference

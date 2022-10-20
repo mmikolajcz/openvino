@@ -7,7 +7,7 @@
 #include <ngraph/validation_util.hpp>
 
 #include "itt.hpp"
-#include "ngraph/runtime/reference/elementwise_functor_call.hpp"
+#include "ngraph/runtime/reference/is_nan.hpp"
 
 namespace ov {
 ov::op::v10::IsNaN::IsNaN(const Output<Node>& data) : op::Op{{data}} {
@@ -36,15 +36,10 @@ bool ov::op::v10::IsNaN::visit_attributes(AttributeVisitor& visitor) {
 namespace {
 template <element::Type_t ET>
 bool evaluate_exec(const HostTensorPtr& input, const HostTensorPtr& output) {
-    using T = typename element_type_traits<ET>::value_type;
-    using U = typename element_type_traits<element::Type_t::boolean>::value_type;
-    ngraph::runtime::reference::elementwise_functor_call(
+    ngraph::runtime::reference::is_nan(
         input->get_data_ptr<ET>(),
         output->get_data_ptr<element::Type_t::boolean>(),
-        shape_size(input->get_shape()),
-        [](T x) -> U {
-            return static_cast<U>(std::isnan(x));
-        });
+        shape_size(input->get_shape()));
     return true;
 }
 
