@@ -36,10 +36,9 @@ bool ov::op::v10::IsNaN::visit_attributes(AttributeVisitor& visitor) {
 namespace {
 template <element::Type_t ET>
 bool evaluate_exec(const HostTensorPtr& input, const HostTensorPtr& output) {
-    ngraph::runtime::reference::is_nan(
-        input->get_data_ptr<ET>(),
-        output->get_data_ptr<element::Type_t::boolean>(),
-        shape_size(input->get_shape()));
+    ngraph::runtime::reference::is_nan(input->get_data_ptr<ET>(),
+                                       output->get_data_ptr<element::Type_t::boolean>(),
+                                       shape_size(input->get_shape()));
     return true;
 }
 
