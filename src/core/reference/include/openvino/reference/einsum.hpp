@@ -4,8 +4,6 @@
 
 #pragma once
 
-#include <algorithm>
-
 #include "openvino/op/einsum.hpp"
 #include "openvino/reference/broadcast.hpp"
 #include "openvino/reference/matmul.hpp"
@@ -13,8 +11,7 @@
 #include "openvino/reference/reduce_sum.hpp"
 #include "openvino/reference/reshape.hpp"
 #include "openvino/reference/transpose.hpp"
-#include "openvino/reference/utils/span.hpp"
-#include "openvino/runtime/tensor.hpp"
+
 namespace ov {
 namespace reference {
 namespace {
