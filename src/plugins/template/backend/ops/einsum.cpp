@@ -11,7 +11,8 @@ bool evaluate(const std::shared_ptr<ov::op::v7::Einsum>& op,
               ov::TensorVector& outputs,
               const ov::TensorVector& inputs) {
     const auto equation = op->get_equation();
-    ov::reference::einsum(outputs, inputs, equation);
+    using T = typename ov::element_type_traits<ET>::value_type;
+    ov::reference::einsum(inputs, outputs[0].data<T>(), equation);
     return true;
 }
 
