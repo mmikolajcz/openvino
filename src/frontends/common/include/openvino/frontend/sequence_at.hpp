@@ -28,6 +28,7 @@ public:
 
     SequenceAt(const Output<Node>& input_sequence, const Output<Node>& position);
 
+    void validate_and_infer_types() override;
     std::shared_ptr<Node> clone_with_new_inputs(const OutputVector& inputs) const override;
 
     Output<Node> get_input_sequence() const {

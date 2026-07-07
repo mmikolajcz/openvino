@@ -36,6 +36,7 @@ public:
     /// \param position The position at which to insert
     SequenceInsert(const Output<Node>& input_sequence, const Output<Node>& tensor, const Output<Node>& position);
 
+    void validate_and_infer_types() override;
     std::shared_ptr<Node> clone_with_new_inputs(const OutputVector& inputs) const override;
 
     /// \brief Get the input sequence

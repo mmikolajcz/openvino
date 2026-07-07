@@ -36,7 +36,9 @@ ov::OutputVector sequence_at(const ov::frontend::onnx::Node& node) {
     const auto& inputs = node.get_ov_inputs();
 
     auto position = inputs[1];
-    OPENVINO_ASSERT(position.get_partial_shape().rank().compatible(0), "SequenceAt: 'position' input must be a scalar");
+    // Position either scalar or single-element 1D tensor.
+    bool position_is_scalar = position.get_partial_shape().rank().compatible(0) || (position.get_partial_shape().rank().compatible(1) && position.get_partial_shape()[0].compatible(1));
+    OPENVINO_ASSERT(position_is_scalar, "SequenceAt: 'position' input must be a scalar");
 
     // Fast path: input is a SequenceMark chain - resolve directly.
     if (const auto input_sequence = as_type_ptr<SequenceMark>(inputs[0].get_node_shared_ptr())) {

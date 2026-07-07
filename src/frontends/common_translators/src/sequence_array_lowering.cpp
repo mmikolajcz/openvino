@@ -4,6 +4,7 @@
 
 #include "sequence_array_lowering.hpp"
 
+#include <algorithm>
 #include <functional>
 #include <map>
 #include <numeric>
@@ -295,6 +296,14 @@ void align_if_branch_result_ranks(const std::shared_ptr<ov::Model>& root) {
                     continue;
                 }
                 if (t_ps.rank().get_length() == e_ps.rank().get_length()) {
+                    continue;
+                }
+                // Only realign placeholder seeds introduced by sequence lowering, which
+                // replace a dead branch Result with a rank-0 scalar ({0} / {0.0f}) while
+                // the sibling branch carries the real rank-N sequence value. Genuine
+                // conditional-rank branches (e.g. a then-branch Squeeze vs an else-branch
+                // Identity) legitimately differ in rank and must be left untouched.
+                if (std::min(t_ps.rank().get_length(), e_ps.rank().get_length()) != 0) {
                     continue;
                 }
                 bool then_is_smaller = t_ps.rank().get_length() < e_ps.rank().get_length();
