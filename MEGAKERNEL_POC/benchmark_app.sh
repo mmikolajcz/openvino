@@ -41,3 +41,5 @@ ZE_AFFINITY_MASK=0 "${benchmark_app_path}" \
 	"attention_mask:${input_dir}/attention_mask.npy" \
 	"position_ids:${input_dir}/position_ids.npy" \
 	"beam_idx:${input_dir}/beam_idx.npy"
+
+echo "Fin"
