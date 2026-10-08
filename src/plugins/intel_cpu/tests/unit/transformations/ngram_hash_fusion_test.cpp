@@ -19,7 +19,8 @@
 #include "openvino/op/unsqueeze.hpp"
 #include "openvino/pass/manager.hpp"
 #include "openvino/runtime/core.hpp"
-#include "transformations/cpu_opset/common/pass/ngram_hash_decomposition.hpp"
+#include "transformations/cpu_opset/common/op/ngram_hash.hpp"
+#include "transformations/cpu_opset/common/pass/ngram_hash_fusion.hpp"
 
 using namespace ov;
 
@@ -60,6 +61,15 @@ bool has_floor_mod(const std::shared_ptr<Model>& model) {
     return false;
 }
 
+bool has_ngram_hash(const std::shared_ptr<Model>& model) {
+    for (const auto& node : model->get_ordered_ops()) {
+        if (ov::is_type<ov::intel_cpu::NgramHashNode>(node)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 int64_t floor_mod_ref(int64_t a, int64_t m) {
     int64_t r = a % m;
     if (r < 0) {
@@ -68,32 +78,22 @@ int64_t floor_mod_ref(int64_t a, int64_t m) {
     return r;
 }
 
-}  // namespace
+// int64 multiply with two's-complement wrap-around, as torch/the traced graph does.
+int64_t wrap_mul(int64_t a, int64_t b) {
+    return static_cast<int64_t>(static_cast<uint64_t>(a) * static_cast<uint64_t>(b));
+}
 
-// The real bug this pass fixes: CPU's ConvertPrecision unconditionally downcasts every i64 op to
-// i32 (see transformation_pipeline.cpp's i64->i32 entry), silently truncating this hash's
-// intermediate products/XORs regardless of whether any constant itself overflows int32. So the
-// correctness check here must go through the actual CPU plugin (statically linked into this test
-// binary), not the generic core interpreter: ov::Model::evaluate() has no reference kernels for
-// BitwiseXor/BitwiseAnd/BitwiseRightShift and can't run either the before- or after-pass graph.
-TEST(NgramHashDecompositionTest, MatchesReferenceOnCpu) {
+void check_on_cpu(int64_t m0, int64_t m1, const std::vector<int64_t>& moduli, const std::vector<int64_t>& offsets) {
     const Shape token_shape{2, 5};
-    const int64_t m0 = 1234567891011LL;  // does not fit int32
-    const int64_t m1 = 777013;           // fits int32, but token*m1 still doesn't
-    const std::vector<int64_t> moduli{1000003, 1000033};
-    const std::vector<int64_t> offsets{0, 1000000};
-
-    auto model_before = build_model(element::i64, m0, m1, moduli, offsets, token_shape);
-    ASSERT_TRUE(has_floor_mod(model_before));
-
-    auto model_after = build_model(element::i64, m0, m1, moduli, offsets, token_shape);
+    auto model = build_model(element::i64, m0, m1, moduli, offsets, token_shape);
     ov::pass::Manager manager;
-    manager.register_pass<ov::intel_cpu::NgramHashDecomposition>();
-    manager.run_passes(model_after);
-    EXPECT_FALSE(has_floor_mod(model_after)) << "pass should have rewritten the FloorMod/i64-Multiply subtree";
+    manager.register_pass<ov::intel_cpu::NgramHashFusion>();
+    manager.run_passes(model);
+    EXPECT_FALSE(has_floor_mod(model)) << "pass should have rewritten the FloorMod/i64-Multiply subtree";
+    EXPECT_TRUE(has_ngram_hash(model));
 
     Core core;
-    auto compiled = core.compile_model(model_after, "CPU");
+    auto compiled = core.compile_model(model, "CPU");
     auto request = compiled.create_infer_request();
 
     std::mt19937 rng(42);
@@ -115,7 +115,7 @@ TEST(NgramHashDecompositionTest, MatchesReferenceOnCpu) {
     const auto* actual = output.data<int64_t>();
 
     for (size_t i = 0; i < count; ++i) {
-        int64_t mixed = (t0_data[i] * m0) ^ (t1_data[i] * m1);
+        int64_t mixed = wrap_mul(t0_data[i], m0) ^ wrap_mul(t1_data[i], m1);
         for (size_t h = 0; h < moduli.size(); ++h) {
             int64_t expected = floor_mod_ref(mixed, moduli[h]) + offsets[h];
             EXPECT_EQ(expected, actual[i * moduli.size() + h]) << "token_idx=" << i << " head=" << h;
@@ -123,7 +123,29 @@ TEST(NgramHashDecompositionTest, MatchesReferenceOnCpu) {
     }
 }
 
-TEST(NgramHashDecompositionTest, DoesNotFireOnI32) {
+}  // namespace
+
+// The real bug this pass fixes: CPU's ConvertPrecision unconditionally downcasts every i64 op to
+// i32 (see transformation_pipeline.cpp's i64->i32 entry), silently truncating this hash's
+// intermediate products/XORs regardless of whether any constant itself overflows int32. So the
+// correctness check here must go through the actual CPU plugin (statically linked into this test
+// binary): ov::Model::evaluate() has no reference kernel for the fused NgramHash node.
+TEST(NgramHashFusionTest, MatchesReferenceOnCpu) {
+    check_on_cpu(1234567891011LL,  // does not fit int32
+                 777013,           // fits int32, but token*m1 still doesn't
+                 {1000003, 1000033},
+                 {0, 1000000});
+}
+
+TEST(NgramHashFusionTest, WrapsAroundLikeInt64) {
+    // token * multiplier overflows int64, so mixed values go negative: checks wrap-around + floor_mod sign.
+    check_on_cpu(static_cast<int64_t>(0x9E3779B97F4A7C15ULL),
+                 0x3BF58476D1CE4E5BLL,
+                 {20000003, 20000023, 20000033},
+                 {0, 20000003, 40000026});
+}
+
+TEST(NgramHashFusionTest, DoesNotFireOnI32) {
     const Shape token_shape{2, 3};
     const int64_t m0 = 777013;
     const int64_t m1 = 12345;
@@ -132,8 +154,18 @@ TEST(NgramHashDecompositionTest, DoesNotFireOnI32) {
 
     auto model = build_model(element::i32, m0, m1, moduli, offsets, token_shape);
     ov::pass::Manager manager;
-    manager.register_pass<ov::intel_cpu::NgramHashDecomposition>();
+    manager.register_pass<ov::intel_cpu::NgramHashFusion>();
     manager.run_passes(model);
 
     EXPECT_TRUE(has_floor_mod(model)) << "pass should be a no-op for i32 (CPU doesn't downcast i32 further)";
 }
+
+TEST(NgramHashFusionTest, DoesNotFireWhenIdsOverflowInt32) {
+    auto model = build_model(element::i64, 1234567891011LL, 777013, {1000003, 1000033}, {0, int64_t{1} << 31}, Shape{2, 3});
+    ov::pass::Manager manager;
+    manager.register_pass<ov::intel_cpu::NgramHashFusion>();
+    manager.run_passes(model);
+
+    EXPECT_FALSE(has_ngram_hash(model));
+}
+
