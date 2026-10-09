@@ -21,6 +21,7 @@
 #include "openvino/op/bitwise_and.hpp"
 #include "openvino/op/bitwise_right_shift.hpp"
 #include "openvino/op/bitwise_xor.hpp"
+#include "openvino/op/concat.hpp"
 #include "openvino/op/constant.hpp"
 #include "openvino/op/convert.hpp"
 #include "openvino/op/divide.hpp"
@@ -30,6 +31,9 @@
 #include "openvino/op/less.hpp"
 #include "openvino/op/multiply.hpp"
 #include "openvino/op/reshape.hpp"
+#include "openvino/op/select.hpp"
+#include "openvino/op/split.hpp"
+#include "openvino/op/squeeze.hpp"
 #include "openvino/op/subtract.hpp"
 #include "openvino/op/unsqueeze.hpp"
 #include "openvino/pass/pattern/matcher.hpp"
@@ -76,9 +80,9 @@ int64_t pow_mod(int64_t base, int64_t exp, int64_t mod) {
 // CPU int32 comparisons also go through float, so the corrections only ever compare against zero.
 ov::Output<ov::Node> make_mod_exact(const ov::Output<ov::Node>& x,
                                      const ov::Output<ov::Node>& modulus,
+                                     const ov::Output<ov::Node>& modulus_f32,
                                      ov::NodeVector& new_ops) {
     auto x_f32 = std::make_shared<v0::Convert>(x, ov::element::f32);
-    auto modulus_f32 = std::make_shared<v0::Convert>(modulus, ov::element::f32);
     auto div = std::make_shared<v1::Divide>(x_f32, modulus_f32);
     auto floor = std::make_shared<v0::Floor>(div);
     auto q = std::make_shared<v0::Convert>(floor, ov::element::i32);
@@ -87,19 +91,15 @@ ov::Output<ov::Node> make_mod_exact(const ov::Output<ov::Node>& x,
 
     auto zero = v0::Constant::create(ov::element::i32, ov::Shape{}, {0});
     auto is_neg = std::make_shared<v1::Less>(r, zero);
-    auto is_neg_i32 = std::make_shared<v0::Convert>(is_neg, ov::element::i32);
-    auto neg_fix = std::make_shared<v1::Multiply>(is_neg_i32, modulus);
-    auto r_fixed_low = std::make_shared<v1::Add>(r, neg_fix);
+    auto r_plus = std::make_shared<v1::Add>(r, modulus);
+    auto r_low = std::make_shared<v1::Select>(is_neg, r_plus, r);
 
-    auto r_minus_modulus = std::make_shared<v1::Subtract>(r_fixed_low, modulus);
-    auto is_ge = std::make_shared<v1::GreaterEqual>(r_minus_modulus, zero);
-    auto is_ge_i32 = std::make_shared<v0::Convert>(is_ge, ov::element::i32);
-    auto pos_fix = std::make_shared<v1::Multiply>(is_ge_i32, modulus);
-    auto result = std::make_shared<v1::Subtract>(r_fixed_low, pos_fix);
+    auto r_minus = std::make_shared<v1::Subtract>(r_low, modulus);
+    auto is_ge = std::make_shared<v1::GreaterEqual>(r_minus, zero);
+    auto result = std::make_shared<v1::Select>(is_ge, r_minus, r_low);
 
     new_ops.insert(new_ops.end(),
-                    {x_f32, modulus_f32, div, floor, q, qm, r, zero, is_neg, is_neg_i32, neg_fix, r_fixed_low,
-                     r_minus_modulus, is_ge, is_ge_i32, pos_fix, result});
+                   {x_f32, div, floor, q, qm, r, zero, is_neg, r_plus, r_low, is_ge, r_minus, result});
     return result;
 }
 
@@ -134,9 +134,9 @@ std::vector<ov::Output<ov::Node>> build_clean_limbs(const ov::Output<ov::Node>& 
         new_ops.insert(new_ops.end(), {shr_mid, mid});
         contributions[k + 1].push_back(mid);
 
-        auto shr_high = std::make_shared<v15::BitwiseRightShift>(raw, shift24);
-        auto high = std::make_shared<v13::BitwiseAnd>(shr_high, mask_const);
-        new_ops.insert(new_ops.end(), {shr_high, high});
+        // raw < 2**30 (token <= 18 bits), so raw >> 24 already fits in a limb.
+        auto high = std::make_shared<v15::BitwiseRightShift>(raw, shift24);
+        new_ops.push_back(high);
         contributions[k + 2].push_back(high);
     }
 
@@ -300,6 +300,9 @@ ov::intel_cpu::NgramHashDecomposition::NgramHashDecomposition() {
             num_mult_limbs = std::max<size_t>(num_mult_limbs, static_cast<size_t>((bit_length(v) + LIMB_BITS - 1) / LIMB_BITS));
         }
         const size_t num_clean_limbs = num_mult_limbs + SPREAD_LIMBS;
+        if (static_cast<int64_t>(2 * num_clean_limbs) * max_modulus >= (int64_t{1} << 31)) {
+            return false;
+        }
 
         ov::NodeVector new_ops;
         std::vector<std::vector<ov::Output<ov::Node>>> operand_clean_limbs;
@@ -327,51 +330,59 @@ ov::intel_cpu::NgramHashDecomposition::NgramHashDecomposition() {
         }
 
         // Big integer in 12-bit limbs modulo several primes at once, as
-        // `sum_k limb6_k * (2**(6k) mod p) mod p` in int32.
-        // 6-bit limbs keep every product below 2**31 given the `63 * p < 2**31` bound above.
+        // `sum_k limb6_k * (2**(6k) mod p) mod p` in int32, with all 6-bit limbs stacked on one extra
+        // axis so the per-term reduction is a single subgraph.
+        // 6-bit limbs keep every product below 2**31 given the `63 * p < 2**31` bound above, and the sum
+        // of the 2 * num_clean_limbs reduced terms stays below 2**31 (checked when matching).
         std::vector<int32_t> moduli_i32(moduli.begin(), moduli.end());
+        std::vector<float> moduli_f32(moduli.begin(), moduli.end());
         auto moduli_const_i32 = v0::Constant::create(ov::element::i32, ov::Shape{heads}, moduli_i32);
-        new_ops.push_back(moduli_const_i32);
-
+        auto moduli_const_f32 = v0::Constant::create(ov::element::f32, ov::Shape{heads}, moduli_f32);
         auto mask63 = v0::Constant::create(ov::element::i32, ov::Shape{}, {63});
         auto shift6 = v0::Constant::create(ov::element::i32, ov::Shape{}, {6});
         auto last_axis = v0::Constant::create(ov::element::i64, ov::Shape{1}, {-1});
-        new_ops.insert(new_ops.end(), {mask63, shift6, last_axis});
+        auto limb_axis = v0::Constant::create(ov::element::i64, ov::Shape{}, {-2});
+        new_ops.insert(new_ops.end(), {moduli_const_i32, moduli_const_f32, mask63, shift6, last_axis, limb_axis});
 
-        std::vector<ov::Output<ov::Node>> terms;
-        size_t k = 0;
+        ov::OutputVector limb_columns;
         for (auto& limb : mixed_limbs) {
-            for (int half = 0; half < 2; ++half) {
-                ov::Output<ov::Node> limb6;
-                if (half == 0) {
-                    limb6 = std::make_shared<v13::BitwiseAnd>(limb, mask63);
-                } else {
-                    // limb < 2**12, so limb >> 6 already fits 6 bits: no extra mask needed.
-                    limb6 = std::make_shared<v15::BitwiseRightShift>(limb, shift6);
-                }
-                new_ops.push_back(limb6.get_node_shared_ptr());
+            auto column = std::make_shared<v0::Unsqueeze>(limb, last_axis);
+            new_ops.push_back(column);
+            limb_columns.push_back(column);
+        }
+        auto limbs12 = std::make_shared<v0::Concat>(limb_columns, -1);
+        auto low6 = std::make_shared<v13::BitwiseAnd>(limbs12, mask63);
+        // limb < 2**12, so limb >> 6 already fits 6 bits: no extra mask needed.
+        auto high6 = std::make_shared<v15::BitwiseRightShift>(limbs12, shift6);
+        auto limbs6 = std::make_shared<v0::Concat>(ov::OutputVector{low6, high6}, -1);
+        auto limbs6_column = std::make_shared<v0::Unsqueeze>(limbs6, last_axis);
+        new_ops.insert(new_ops.end(), {limbs12, low6, high6, limbs6, limbs6_column});
 
-                std::vector<int32_t> weight_vals(heads);
-                for (size_t h = 0; h < heads; ++h) {
-                    weight_vals[h] = static_cast<int32_t>(pow_mod(2, 6 * static_cast<int64_t>(k), moduli[h]));
-                }
-                auto weight_const = v0::Constant::create(ov::element::i32, ov::Shape{heads}, weight_vals);
-                auto limb6_unsq = std::make_shared<v0::Unsqueeze>(limb6, last_axis);
-                auto weighted = std::make_shared<v1::Multiply>(limb6_unsq, weight_const);
-                new_ops.insert(new_ops.end(), {weight_const, limb6_unsq, weighted});
-
-                terms.push_back(make_mod_exact(weighted, moduli_const_i32, new_ops));
-                ++k;
+        // limbs6 is [low_0 .. low_{L-1}, high_0 .. high_{L-1}]: low_j is 6-bit limb 2j, high_j is limb 2j+1.
+        std::vector<int32_t> weight_vals(2 * num_clean_limbs * heads);
+        for (size_t i = 0; i < 2 * num_clean_limbs; ++i) {
+            const auto k = static_cast<int64_t>(i < num_clean_limbs ? 2 * i : 2 * (i - num_clean_limbs) + 1);
+            for (size_t h = 0; h < heads; ++h) {
+                weight_vals[i * heads + h] = static_cast<int32_t>(pow_mod(2, 6 * k, moduli[h]));
             }
         }
+        auto weights = v0::Constant::create(ov::element::i32, ov::Shape{2 * num_clean_limbs, heads}, weight_vals);
+        auto weighted = std::make_shared<v1::Multiply>(limbs6_column, weights);
+        new_ops.insert(new_ops.end(), {weights, weighted});
 
-        ov::Output<ov::Node> total = terms[0];
-        for (size_t i = 1; i < terms.size(); ++i) {
-            auto add = std::make_shared<v1::Add>(total, terms[i]);
+        auto terms = make_mod_exact(weighted, moduli_const_i32, moduli_const_f32, new_ops);
+        // CPU ReduceSum accumulates i32 through f32 (inexact above 2**24), so sum with exact i32 Adds.
+        auto split = std::make_shared<v1::Split>(terms, limb_axis, 2 * num_clean_limbs);
+        new_ops.push_back(split);
+        ov::Output<ov::Node> sum = split->output(0);
+        for (size_t i = 1; i < 2 * num_clean_limbs; ++i) {
+            auto add = std::make_shared<v1::Add>(sum, split->output(i));
             new_ops.push_back(add);
-            total = add;
+            sum = add;
         }
-        auto reduced = make_mod_exact(total, moduli_const_i32, new_ops);
+        auto total = std::make_shared<v0::Squeeze>(sum, limb_axis);
+        new_ops.push_back(total);
+        auto reduced = make_mod_exact(total, moduli_const_i32, moduli_const_f32, new_ops);
 
         auto reduced_as_orig_type = std::make_shared<v0::Convert>(reduced, offsets_const->get_element_type());
         auto result = std::make_shared<v1::Add>(reduced_as_orig_type, offsets_const);
